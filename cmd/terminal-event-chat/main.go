@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -9,11 +10,19 @@ import (
 )
 
 const broker = "localhost:9092"
+const topic = "chat.messages"
+const partition = 0
 
 func main() {
+	go consume()
+
+	produce()
+
+	select {}
+}
+
+func produce() {
 	// to produce messages
-	topic := "chat.messages"
-	partition := 0
 
 	conn, err := kafka.DialLeader(context.Background(), "tcp", broker, topic, partition)
 	if err != nil {
@@ -32,5 +41,24 @@ func main() {
 
 	if err := conn.Close(); err != nil {
 		log.Fatal("failed to close writer:", err)
+	}
+}
+
+func consume() {
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers:     []string{broker},
+		Topic:       topic,
+		Partition:   partition,
+		StartOffset: kafka.FirstOffset,
+	})
+	defer reader.Close()
+
+	for {
+		message, err := reader.ReadMessage(context.Background())
+		if err != nil {
+			log.Fatal("failed to read message:", err)
+		}
+
+		fmt.Println(string(message.Value))
 	}
 }

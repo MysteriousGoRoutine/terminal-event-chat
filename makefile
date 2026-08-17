@@ -1,7 +1,11 @@
 COMPOSE := docker compose -f deployments/docker-compose.yaml
 TOPIC := chat.messages
+RUN := go run cmd/terminal-event-chat/main.go
 
-.PHONY: kafka-up kafka-init kafka-down kafka-topics kafka-read-topic
+.PHONY: run kafka-up kafka-init kafka-down kafka-topics kafka-read-topic
+
+run:
+	$(RUN)
 
 kafka-up:
 	$(COMPOSE) up -d
