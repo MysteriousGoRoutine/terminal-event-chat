@@ -2,7 +2,7 @@ COMPOSE := docker compose -f deployments/docker-compose.yaml
 TOPIC := chat.messages
 RUN := go run cmd/terminal-event-chat/main.go
 
-.PHONY: run kafka-up kafka-init kafka-down kafka-topics kafka-read-topic
+.PHONY: run kafka-up kafka-init kafka-down kafka-topics kafka-read-topic  kafka-reset-topic
 
 run:
 	$(RUN)
@@ -33,6 +33,17 @@ kafka-read-topic:
     --topic chat.messages \
     --from-beginning \
     # --max-messages 1
+
+kafka-reset-topic:
+	docker exec broker /opt/kafka/bin/kafka-topics.sh \
+		--bootstrap-server localhost:9092 \
+		--delete --topic $(TOPIC)
+	@until ! docker exec broker /opt/kafka/bin/kafka-topics.sh \
+		--bootstrap-server localhost:9092 --list | grep -qx "$(TOPIC)"; do \
+		echo "Waiting for topic deletion..."; \
+		sleep 1; \
+	done
+	$(MAKE) kafka-init
 
 kafka-down:
 	$(COMPOSE) down

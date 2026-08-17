@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -29,14 +31,21 @@ func produce() {
 		log.Fatal("failed to dial leader:", err)
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	_, err = conn.WriteMessages(
-		kafka.Message{Value: []byte("Hello World one!")},
-		kafka.Message{Value: []byte("Hello World two!")},
-		kafka.Message{Value: []byte("Hello World three!")},
-	)
-	if err != nil {
-		log.Fatal("failed to write messages:", err)
+	scanner := bufio.NewScanner(os.Stdin)
+
+	for scanner.Scan() {
+		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+
+		_, err = conn.WriteMessages(
+			kafka.Message{Value: []byte(scanner.Text())},
+		)
+		if err != nil {
+			log.Fatal("failed to write messages:", err)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Fatal("failed to read input:", err)
 	}
 
 	if err := conn.Close(); err != nil {
