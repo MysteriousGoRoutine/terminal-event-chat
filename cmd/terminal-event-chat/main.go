@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -18,11 +19,15 @@ const broker = "localhost:9092"
 const topic = "chat.messages"
 const partition = 0
 
-var name string
+var (
+	name       string
+	terminalMu sync.Mutex
+)
 
 type message struct {
 	Author string `json:"author"`
 	Text   string `json:"text"`
+	Time   string `json:"time"`
 }
 
 func init() {
@@ -53,7 +58,7 @@ func main() {
 
 	produce(scanner)
 
-	select {}
+	// select {}
 }
 
 func produce(scanner *bufio.Scanner) {
@@ -65,8 +70,19 @@ func produce(scanner *bufio.Scanner) {
 		log.Fatal("failed to dial leader:", err)
 	}
 
-	for scanner.Scan() {
-		message := message{Author: name, Text: scanner.Text()}
+	for {
+		printPrompt()
+
+		if !scanner.Scan() {
+			break
+		}
+
+		message := message{
+			Time:   time.Now().Format(time.DateTime),
+			Author: name,
+			Text:   scanner.Text(),
+		}
+
 		jsonMessage, err := json.Marshal(message)
 		if err != nil {
 			log.Fatal("failed to marshal message:", err)
@@ -91,12 +107,28 @@ func produce(scanner *bufio.Scanner) {
 	}
 }
 
+func printPrompt() {
+	terminalMu.Lock()
+	defer terminalMu.Unlock()
+
+	fmt.Print("> enter message: ")
+}
+
+func printMessage(message message) {
+	terminalMu.Lock()
+	defer terminalMu.Unlock()
+
+	fmt.Print("\r\033[2K")
+	fmt.Printf("%s %s: %s\n", message.Time, message.Author, message.Text)
+	fmt.Print("> enter message: ")
+}
+
 func consume() {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{broker},
 		Topic:       topic,
 		Partition:   partition,
-		StartOffset: kafka.FirstOffset,
+		StartOffset: kafka.LastOffset,
 	})
 	defer reader.Close()
 
@@ -111,6 +143,6 @@ func consume() {
 			log.Fatal("failed to unmarshal message:", err)
 		}
 
-		fmt.Printf("%s: %s\n", message.Author, message.Text)
+		printMessage(message)
 	}
 }
