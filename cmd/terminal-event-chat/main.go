@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ func init() {
 }
 
 func main() {
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for name == "" {
 		fmt.Print("Enter your name: ")
@@ -54,56 +56,65 @@ func main() {
 		name = strings.TrimSpace(scanner.Text())
 	}
 
-	go consume()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
 
-	produce(scanner)
+	go consume(ctx)
+
+	produce(scanner, ctx)
 
 	// select {}
 }
 
-func produce(scanner *bufio.Scanner) {
+func produce(scanner *bufio.Scanner, ctx context.Context) {
 
 	// to produce messages
 
-	conn, err := kafka.DialLeader(context.Background(), "tcp", broker, topic, partition)
+	conn, err := kafka.DialLeader(ctx, "tcp", broker, topic, partition)
 	if err != nil {
 		log.Fatal("failed to dial leader:", err)
 	}
+	defer conn.Close()
 
+	lines := make(chan string)
+	defer close(lines)
+
+	go func() {
+		for {
+			printPrompt()
+			if !scanner.Scan() {
+				break
+			}
+
+			message := message{
+				Time:   time.Now().Format(time.DateTime),
+				Author: name,
+				Text:   scanner.Text(),
+			}
+
+			jsonMessage, err := json.Marshal(message)
+			if err != nil {
+				log.Fatal("failed to marshal message:", err)
+			}
+
+			lines <- string(jsonMessage)
+		}
+	}()
 	for {
-		printPrompt()
+		select {
+		case jsonMessage := <-lines:
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
-		if !scanner.Scan() {
-			break
+			_, err = conn.WriteMessages(
+				kafka.Message{Value: []byte(jsonMessage)},
+			)
+			if err != nil {
+				log.Fatal("failed to write messages:", err)
+			}
+
+		case <-ctx.Done():
+			return
 		}
-
-		message := message{
-			Time:   time.Now().Format(time.DateTime),
-			Author: name,
-			Text:   scanner.Text(),
-		}
-
-		jsonMessage, err := json.Marshal(message)
-		if err != nil {
-			log.Fatal("failed to marshal message:", err)
-		}
-
-		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-
-		_, err = conn.WriteMessages(
-			kafka.Message{Value: []byte(jsonMessage)},
-		)
-		if err != nil {
-			log.Fatal("failed to write messages:", err)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Fatal("failed to read input:", err)
-	}
-
-	if err := conn.Close(); err != nil {
-		log.Fatal("failed to close writer:", err)
 	}
 }
 
@@ -123,7 +134,7 @@ func printMessage(message message) {
 	fmt.Print("> enter message: ")
 }
 
-func consume() {
+func consume(ctx context.Context) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     []string{broker},
 		Topic:       topic,
@@ -133,8 +144,11 @@ func consume() {
 	defer reader.Close()
 
 	for {
-		kafkaMessage, err := reader.ReadMessage(context.Background())
+		kafkaMessage, err := reader.ReadMessage(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			log.Fatal("failed to read message:", err)
 		}
 
