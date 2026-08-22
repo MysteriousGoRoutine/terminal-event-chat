@@ -87,17 +87,6 @@ func produce(scanner *bufio.Scanner, ctx context.Context, cancel func()) {
 				break
 			}
 
-			// message := message{
-			// 	Time:   time.Now().Format(time.DateTime),
-			// 	Author: name,
-			// 	Text:   scanner.Text(),
-			// }
-
-			// jsonMessage, err := json.Marshal(message)
-			// if err != nil {
-			// 	log.Fatal("failed to marshal message:", err)
-			// }
-
 			lines <- scanner.Text()
 		}
 	}()
