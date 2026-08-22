@@ -4,10 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -18,127 +19,176 @@ import (
 const broker = "localhost:9092"
 const topic = "chat.messages"
 const partition = 0
+const messagePrompt = "> enter message: "
 
 var (
 	name       string
 	terminalMu sync.Mutex
 )
 
-type message struct {
+// Message is the JSON format stored in the Kafka topic.
+// All chat clients use these fields to display an incoming message.
+type Message struct {
 	Author string `json:"author"`
 	Text   string `json:"text"`
 	Time   string `json:"time"`
 }
 
-func init() {
-	flag.StringVar(&name, "name", "", "name for the chat")
-	flag.Parse()
+func main() {
+	// Один Scanner используется и для имени, и для сообщений: два Scanner
+	// для одного os.Stdin могут конкурировать за входные данные.
+	scanner := bufio.NewScanner(os.Stdin)
 	if name == "" {
-		name = os.Getenv("NAME")
+		var err error
+		name, err = readName(scanner)
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			log.Fatal("failed to read name:", err)
+		}
 	}
 
-	name = strings.TrimSpace(name)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	// Получение сообщений работает параллельно, пока основной поток отправляет их.
+	go consume(ctx)
+	produce(scanner, name, ctx, cancel)
 }
 
-func main() {
-	scanner := bufio.NewScanner(os.Stdin)
-	for name == "" {
+func readName(scanner *bufio.Scanner) (string, error) {
+	for {
 		fmt.Print("Enter your name: ")
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
-				log.Fatal("failed to read name:", err)
+				return "", err
 			}
-			return
+			return "", io.EOF
 		}
 
-		name = strings.TrimSpace(scanner.Text())
+		name := strings.TrimSpace(scanner.Text())
+		if name != "" {
+			return name, nil
+		}
 	}
-
-	go consume()
-
-	produce(scanner)
-
-	// select {}
 }
 
-func produce(scanner *bufio.Scanner) {
+func produce(scanner *bufio.Scanner, author string, ctx context.Context, cancel func()) {
+	conn := dialLeader(ctx)
+	defer conn.Close()
 
-	// to produce messages
+	// Канал отделяет блокирующее чтение из терминала от отправки в Kafka.
+	lines := scanLines(scanner)
+	for {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				return
+			}
 
-	conn, err := kafka.DialLeader(context.Background(), "tcp", broker, topic, partition)
+			line = strings.TrimSpace(line)
+			if line == "/exit" {
+				cancel()
+				return
+			}
+
+			sendMessage(conn, newMessage(author, line))
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func dialLeader(ctx context.Context) *kafka.Conn {
+	conn, err := kafka.DialLeader(ctx, "tcp", broker, topic, partition)
 	if err != nil {
 		log.Fatal("failed to dial leader:", err)
 	}
 
-	for {
-		printPrompt()
+	return conn
+}
 
-		if !scanner.Scan() {
-			break
+func scanLines(scanner *bufio.Scanner) <-chan string {
+	lines := make(chan string)
+
+	go func() {
+		defer close(lines)
+		for {
+			printPrompt()
+			ok := scanner.Scan()
+			if !ok {
+				break
+			}
+
+			lines <- scanner.Text()
 		}
+	}()
 
-		message := message{
-			Time:   time.Now().Format(time.DateTime),
-			Author: name,
-			Text:   scanner.Text(),
-		}
+	return lines
+}
 
-		jsonMessage, err := json.Marshal(message)
-		if err != nil {
-			log.Fatal("failed to marshal message:", err)
-		}
+func newMessage(author, text string) Message {
+	return Message{
+		Author: author,
+		Text:   text,
+		Time:   time.Now().Format(time.DateTime),
+	}
+}
 
-		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-
-		_, err = conn.WriteMessages(
-			kafka.Message{Value: []byte(jsonMessage)},
-		)
-		if err != nil {
-			log.Fatal("failed to write messages:", err)
-		}
+func sendMessage(conn *kafka.Conn, message Message) {
+	// Deadline ограничивает ожидание, если Kafka недоступна.
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		log.Fatal("failed to set write deadline:", err)
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Fatal("failed to read input:", err)
+	jsonMessage, err := json.Marshal(message)
+	if err != nil {
+		log.Fatal("failed to marshal message:", err)
 	}
 
-	if err := conn.Close(); err != nil {
-		log.Fatal("failed to close writer:", err)
+	if _, err := conn.WriteMessages(kafka.Message{Value: jsonMessage}); err != nil {
+		log.Fatal("failed to write message:", err)
 	}
 }
 
 func printPrompt() {
+	// Consumer тоже печатает в терминал, поэтому видимый вывод защищён одним mutex.
 	terminalMu.Lock()
 	defer terminalMu.Unlock()
 
-	fmt.Print("> enter message: ")
+	fmt.Print(messagePrompt)
 }
 
-func printMessage(message message) {
+func printMessage(message Message) {
 	terminalMu.Lock()
 	defer terminalMu.Unlock()
 
 	fmt.Print("\r\033[2K")
 	fmt.Printf("%s %s: %s\n", message.Time, message.Author, message.Text)
-	fmt.Print("> enter message: ")
+	fmt.Print(messagePrompt)
 }
 
-func consume() {
+func consume(ctx context.Context) {
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:     []string{broker},
-		Topic:       topic,
-		Partition:   partition,
+		Brokers:   []string{broker},
+		Topic:     topic,
+		Partition: partition,
+		// Новый клиент получает только сообщения, появившиеся после его запуска.
 		StartOffset: kafka.LastOffset,
 	})
 	defer reader.Close()
 
 	for {
-		kafkaMessage, err := reader.ReadMessage(context.Background())
+		kafkaMessage, err := reader.ReadMessage(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			log.Fatal("failed to read message:", err)
 		}
 
-		var message message
+		var message Message
 		if err := json.Unmarshal(kafkaMessage.Value, &message); err != nil {
 			log.Fatal("failed to unmarshal message:", err)
 		}
