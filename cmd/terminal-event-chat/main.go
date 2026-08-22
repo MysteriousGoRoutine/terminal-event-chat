@@ -61,12 +61,12 @@ func main() {
 
 	go consume(ctx)
 
-	produce(scanner, ctx)
+	produce(scanner, ctx, cancel)
 
 	// select {}
 }
 
-func produce(scanner *bufio.Scanner, ctx context.Context) {
+func produce(scanner *bufio.Scanner, ctx context.Context, cancel func()) {
 
 	// to produce messages
 
@@ -77,14 +77,44 @@ func produce(scanner *bufio.Scanner, ctx context.Context) {
 	defer conn.Close()
 
 	lines := make(chan string)
-	defer close(lines)
 
 	go func() {
+		defer close(lines)
 		for {
 			printPrompt()
-			if !scanner.Scan() {
+			ok := scanner.Scan()
+			if !ok {
 				break
 			}
+
+			// message := message{
+			// 	Time:   time.Now().Format(time.DateTime),
+			// 	Author: name,
+			// 	Text:   scanner.Text(),
+			// }
+
+			// jsonMessage, err := json.Marshal(message)
+			// if err != nil {
+			// 	log.Fatal("failed to marshal message:", err)
+			// }
+
+			lines <- scanner.Text()
+		}
+	}()
+	for {
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				return
+			}
+
+			line = strings.TrimSpace(line)
+			if line == "/exit" {
+				cancel()
+				return
+			}
+
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
 			message := message{
 				Time:   time.Now().Format(time.DateTime),
@@ -96,14 +126,6 @@ func produce(scanner *bufio.Scanner, ctx context.Context) {
 			if err != nil {
 				log.Fatal("failed to marshal message:", err)
 			}
-
-			lines <- string(jsonMessage)
-		}
-	}()
-	for {
-		select {
-		case jsonMessage := <-lines:
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 
 			_, err = conn.WriteMessages(
 				kafka.Message{Value: []byte(jsonMessage)},
